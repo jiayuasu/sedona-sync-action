@@ -1,0 +1,49 @@
+name: Sync Sedona Website
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Runs every day at midnight
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Sedona Website Branch
+        uses: actions/checkout@v2
+        with:
+          repository: apache/sedona
+          ref: website
+
+      - name: Copy Files to Working Directory
+        run: |
+          mkdir -p sedona-website
+          cp -r ./* sedona-website/
+
+      - name: Checkout Sedona Website ASF-Site Branch
+        uses: actions/checkout@v2
+        with:
+          repository: apache/sedona-website
+          ref: asf-site
+
+      - name: Remove All Files from ASF-Site Branch
+        run: |
+          rm -rf ./*
+          rm -rf .??*
+
+      - name: Sync Content
+        run: |
+          cp -r sedona-website/* .
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git add .
+          git commit -m "Sync content from Sedona website branch" || echo "No changes to commit"
+
+      - name: Push Changes
+        env:
+          GITHUB_USERNAME: ${{ secrets.USERNAME }}
+          GITHUB_TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          git remote set-url origin https://${GITHUB_USERNAME}:${GITHUB_TOKEN}@github.com/apache/sedona-website.git
+          git push origin asf-site
