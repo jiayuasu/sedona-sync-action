@@ -10,31 +10,28 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Sedona Website Branch
+      - name: Checkout Sedona Website Branch to Specific Folder
         uses: actions/checkout@v2
         with:
           repository: apache/sedona
+          path: sedona-source
           ref: website
 
-      - name: Copy Files to Temporary Directory
-        run: |
-          mkdir -p temp-sedona-website
-          cp -r $(ls -A) temp-sedona-website/
-
-      - name: Checkout Sedona Website ASF-Site Branch
+      - name: Checkout Sedona Website ASF-Site Branch to Specific Folder
         uses: actions/checkout@v2
         with:
           repository: apache/sedona-website
+          path: sedona-website
           ref: asf-site
 
       - name: Remove All Files from ASF-Site Branch
         run: |
-          rm -rf ./*
-          rm -rf .??*
+          rm -rf sedona-website/*
 
       - name: Sync Content
         run: |
-          cp -r temp-sedona-website/* .
+          cp -r sedona-source/* sedona-website/
+          cd sedona-website
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
           git add .
@@ -45,5 +42,6 @@ jobs:
           GITHUB_USERNAME: ${{ secrets.USERNAME }}
           GITHUB_TOKEN: ${{ secrets.TOKEN }}
         run: |
+          cd sedona-website
           git remote set-url origin https://${GITHUB_USERNAME}:${GITHUB_TOKEN}@github.com/apache/sedona-website.git
           git push origin asf-site
