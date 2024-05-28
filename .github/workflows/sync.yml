@@ -16,10 +16,10 @@ jobs:
           repository: apache/sedona
           ref: website
 
-      - name: Copy Files to Working Directory
+      - name: Copy Files to Temporary Directory
         run: |
-          mkdir -p sedona-website
-          cp -r ./* sedona-website/
+          mkdir -p temp-sedona-website
+          cp -r $(ls -A) temp-sedona-website/
 
       - name: Checkout Sedona Website ASF-Site Branch
         uses: actions/checkout@v2
@@ -34,7 +34,7 @@ jobs:
 
       - name: Sync Content
         run: |
-          cp -r sedona-website/* .
+          cp -r temp-sedona-website/* .
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
           git add .
