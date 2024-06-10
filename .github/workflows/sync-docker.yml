@@ -5,6 +5,9 @@ on:
     - cron: '0 0 * * *'  # Runs every day at midnight
   workflow_dispatch:  # Allows manual triggering
 
+env:
+  MAVEN_OPTS: -Dmaven.wagon.httpconnectionManager.ttlSeconds=60
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -25,5 +28,12 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
+      - name: Cache Maven packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2
+
       - name: Build the image
-        run: ./docker/sedona-spark-jupyterlab/build.sh 3.4.1 latest
+        run: ./docker/sedona-spark-jupyterlab/build.sh 3.4.1 latest release
