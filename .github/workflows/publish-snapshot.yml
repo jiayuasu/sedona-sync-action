@@ -1,0 +1,178 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Adapted from https://github.com/apache/sedona/pull/3406.
+name: Publish Sedona snapshots
+
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'  # Every 15 minutes, away from the top of the hour.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MAVEN_OPTS: -Dmaven.wagon.httpconnectionManager.ttlSeconds=60
+  DO_NOT_TRACK: 'true'
+
+# Finish active uploads before another run starts publishing.
+concurrency:
+  group: publish-sedona-snapshots
+  cancel-in-progress: false
+
+jobs:
+  resolve-source:
+    if: github.repository == 'jiayuasu/sedona-sync-action' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      deployments: read
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      changed: ${{ steps.published.outputs.changed }}
+    steps:
+      - name: Record the upstream commit
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          SOURCE_SHA=$(gh api repos/apache/sedona/commits/master --jq .sha)
+          if [[ ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::GitHub did not return a valid upstream commit SHA"
+            exit 1
+          fi
+          echo "sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Source: [apache/sedona@${SOURCE_SHA}](https://github.com/apache/sedona/commit/${SOURCE_SHA})" >> "$GITHUB_STEP_SUMMARY"
+      - name: Check the last published commit
+        id: published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        shell: bash
+        run: |
+          PUBLISHED_SHA=$(gh api --method GET "repos/${GITHUB_REPOSITORY}/deployments" \
+            -f environment=nexus-snapshots -f task=record-snapshot -F per_page=1 \
+            --jq '.[0].payload.upstream_sha // ""')
+          if [[ "${SOURCE_SHA}" == "${PUBLISHED_SHA}" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "This commit has already been published; skipping the builds." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    needs: resolve-source
+    if: >-
+      github.repository == 'jiayuasu/sedona-sync-action' &&
+      github.ref == 'refs/heads/main' &&
+      needs.resolve-source.outputs.changed == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    # Configure this environment to allow only the main branch, then add
+    # NEXUS_USER and NEXUS_PW as environment secrets.
+    environment: nexus-snapshots
+    strategy:
+      fail-fast: false
+      # Shared modules deploy only from Spark 3.5 / Scala 2.12. Other variants
+      # publish their own Spark artifacts, so the four builds can run together.
+      matrix:
+        include:
+          - spark: '3.5'
+            scala: '2.12'
+            jdk: '11'
+          - spark: '3.5'
+            scala: '2.13'
+            jdk: '11'
+          - spark: '4.0'
+            scala: '2.13'
+            jdk: '17'
+          - spark: '4.1'
+            scala: '2.13'
+            jdk: '17'
+    steps:
+      - name: Checkout Apache Sedona
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: apache/sedona
+          ref: ${{ needs.resolve-source.outputs.sha }}
+          persist-credentials: false
+      - name: Set up Java and Maven authentication
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: zulu
+          java-version: ${{ matrix.jdk }}
+          server-id: apache.snapshots.https
+          server-username: NEXUS_USER
+          server-password: NEXUS_PW
+      - name: Cache Maven packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/repository
+          key: sedona-snapshots-${{ runner.os }}-${{ matrix.spark }}-${{ matrix.scala }}-${{ hashFiles('**/pom.xml') }}
+          restore-keys: sedona-snapshots-${{ runner.os }}-${{ matrix.spark }}-${{ matrix.scala }}-
+      - name: Check the version is a snapshot
+        shell: bash
+        run: |
+          VERSION=$(mvn -N -B -q -Dstyle.color=never help:evaluate -Dexpression=project.version -DforceStdout)
+          echo "Project version: ${VERSION}"
+          if [[ "${VERSION}" != *-SNAPSHOT ]]; then
+            echo "::error::${VERSION} is not a -SNAPSHOT version; refusing to publish it as a snapshot"
+            exit 1
+          fi
+      - name: Publish Spark ${{ matrix.spark }} / Scala ${{ matrix.scala }}
+        env:
+          NEXUS_USER: ${{ secrets.NEXUS_USER }}
+          NEXUS_PW: ${{ secrets.NEXUS_PW }}
+          SPARK: ${{ matrix.spark }}
+          SCALA: ${{ matrix.scala }}
+        shell: bash
+        run: |
+          if [[ -z "${NEXUS_USER}" || -z "${NEXUS_PW}" ]]; then
+            echo "::error::Set NEXUS_USER and NEXUS_PW in this repository's nexus-snapshots environment before publishing"
+            exit 1
+          fi
+          mvn -B -q deploy -DskipTests -Dspark="${SPARK}" -Dscala="${SCALA}"
+
+  record-publish:
+    # A checkpoint is created only after every matrix build has succeeded.
+    # Failed or cancelled builds leave the previous checkpoint intact.
+    needs: [resolve-source, publish]
+    runs-on: ubuntu-22.04
+    permissions:
+      deployments: write
+    steps:
+      - name: Record the published commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.resolve-source.outputs.sha }}
+        shell: bash
+        run: |
+          DEPLOYMENT_ID=$(jq -n \
+            --arg ref "$GITHUB_SHA" \
+            --arg upstream_sha "$SOURCE_SHA" \
+            '{ref: $ref, auto_merge: false, required_contexts: [],
+              environment: "nexus-snapshots", task: "record-snapshot",
+              production_environment: false,
+              description: "Published Apache Sedona Maven snapshots",
+              payload: {upstream_sha: $upstream_sha}}' |
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments" --input - --jq .id)
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments/${DEPLOYMENT_ID}/statuses" \
+            -f state=success -F auto_inactive=false \
+            -f log_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            -f environment_url="https://github.com/apache/sedona/commit/${SOURCE_SHA}" > /dev/null
